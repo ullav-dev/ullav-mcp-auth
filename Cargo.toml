@@ -1,0 +1,31 @@
+[package]
+name = "ullav-mcp-auth"
+version = "0.1.0"
+edition = "2021"
+description = "RS256 JWT validation middleware for Ullav MCP resource servers"
+
+[features]
+# Include the Axum 0.7 middleware wrappers. Disable for services on different frameworks.
+default = ["axum-07"]
+axum-07 = ["dep:axum", "dep:tower", "dep:tower-service"]
+
+[dependencies]
+axum = { version = "0.7", features = ["macros"], optional = true }
+tower = { version = "0.4", features = ["util"], optional = true }
+tower-service = { version = "0.3", optional = true }
+http = "1"
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+dashmap = "6"
+tracing = "0.1"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+axum-test = "15"
+tokio = { version = "1", features = ["full"] }
+wiremock = "0.6"
