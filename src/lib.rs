@@ -7,7 +7,7 @@ pub mod middleware;
 pub mod protected_resource;
 
 pub use error::AuthError;
-pub use validator::{McpClaims, TokenValidator};
+pub use validator::{McpClaims, SubscriptionClaim, TeamClaim, TokenValidator};
 
 #[cfg(feature = "axum-07")]
 pub use middleware::{mcp_auth_middleware, ClaimsExtractor};

@@ -8,8 +8,25 @@ use dashmap::DashMap;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, warn};
+
+/// A user's subscription to a product, as embedded in UUM-issued tokens.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionClaim {
+    /// Plan name: "individual", "family", "professional", "enterprise", etc.
+    pub tier: String,
+    /// Subscription status: "active", "trialing", "past_due", "cancelled".
+    pub status: String,
+}
+
+/// A user's role within a team, as embedded in UUM-issued tokens.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamClaim {
+    /// Positional role: `"owner"`, `"leader"`, or `"member"`.
+    pub role: String,
+}
 
 /// Claims present in OAuth2 access tokens issued by UUM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +40,18 @@ pub struct McpClaims {
     pub scope: String,
     pub client_id: String,
     pub username: String,
+    /// Roles assigned to the user. Defaults to empty so tokens minted before this
+    /// field was added still decode.
+    #[serde(default)]
+    pub roles: Vec<String>,
+    /// Active subscriptions keyed by product slug. Defaults to an empty map so
+    /// tokens minted before this field was added still decode.
+    #[serde(default)]
+    pub subscriptions: HashMap<String, SubscriptionClaim>,
+    /// Active team memberships keyed by team UUID string. Defaults to an empty map
+    /// so tokens minted before this field was added still decode.
+    #[serde(default)]
+    pub teams: HashMap<String, TeamClaim>,
 }
 
 /// Cached JWKS key entry.
@@ -251,6 +280,41 @@ mod tests {
             scope: scope.into(),
             client_id: "claude-desktop".into(),
             username: "testuser".into(),
+            roles: vec![],
+            subscriptions: HashMap::new(),
+            teams: HashMap::new(),
+        };
+        let key = EncodingKey::from_rsa_pem(TEST_KEY_PEM.as_bytes())
+            .expect("test key should load");
+        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(TEST_KEY_KID.into());
+        encode(&header, &claims, &key).expect("token signing should succeed")
+    }
+
+    /// Mint a token whose JSON payload has none of the plan-data fields at all —
+    /// simulating a token issued before `roles`/`subscriptions`/`teams` were added.
+    fn mint_legacy_test_token(issuer: &str, audience: &str, sub: &str, scope: &str) -> String {
+        #[derive(Serialize)]
+        struct LegacyClaims {
+            iss: String,
+            sub: String,
+            aud: String,
+            iat: i64,
+            exp: i64,
+            scope: String,
+            client_id: String,
+            username: String,
+        }
+        let now = chrono::Utc::now().timestamp();
+        let claims = LegacyClaims {
+            iss: issuer.into(),
+            sub: sub.into(),
+            aud: audience.into(),
+            iat: now,
+            exp: now + 3600,
+            scope: scope.into(),
+            client_id: "claude-desktop".into(),
+            username: "testuser".into(),
         };
         let key = EncodingKey::from_rsa_pem(TEST_KEY_PEM.as_bytes())
             .expect("test key should load");
@@ -376,6 +440,85 @@ mod tests {
         let token = mint_test_token("http://evil.example.com", audience, "user1", "read");
         let err = v.validate(&token).await.unwrap_err();
         assert!(matches!(err, AuthError::InvalidToken(_)));
+    }
+
+    #[tokio::test]
+    async fn validator_decodes_legacy_token_missing_plan_fields() {
+        let issuer = "http://localhost:8081";
+        let audience = "http://localhost:8085/cunav/mcp";
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/oauth2/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(test_jwks()))
+            .mount(&server)
+            .await;
+
+        let v = TokenValidator::new(
+            format!("{}/oauth2/jwks", server.uri()),
+            issuer,
+            audience,
+        );
+
+        let token = mint_legacy_test_token(issuer, audience, "user1", "dam:tools");
+        let claims = v.validate(&token).await.expect("legacy token should still decode");
+
+        assert!(claims.roles.is_empty());
+        assert!(claims.subscriptions.is_empty());
+        assert!(claims.teams.is_empty());
+    }
+
+    #[tokio::test]
+    async fn validator_decodes_plan_data_fields() {
+        let issuer = "http://localhost:8081";
+        let audience = "http://localhost:8085/cunav/mcp";
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/oauth2/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(test_jwks()))
+            .mount(&server)
+            .await;
+
+        let v = TokenValidator::new(
+            format!("{}/oauth2/jwks", server.uri()),
+            issuer,
+            audience,
+        );
+
+        let now = chrono::Utc::now().timestamp();
+        let mut subscriptions = HashMap::new();
+        subscriptions.insert(
+            "comad".to_string(),
+            SubscriptionClaim { tier: "team".into(), status: "active".into() },
+        );
+        let mut teams = HashMap::new();
+        teams.insert("team-1".to_string(), TeamClaim { role: "owner".into() });
+
+        let claims = McpClaims {
+            iss: issuer.into(),
+            sub: "user1".into(),
+            aud: audience.into(),
+            iat: now,
+            exp: now + 3600,
+            scope: "dam:tools".into(),
+            client_id: "claude-desktop".into(),
+            username: "testuser".into(),
+            roles: vec!["admin".into()],
+            subscriptions,
+            teams,
+        };
+        let key = EncodingKey::from_rsa_pem(TEST_KEY_PEM.as_bytes()).expect("test key should load");
+        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(TEST_KEY_KID.into());
+        let token = encode(&header, &claims, &key).expect("token signing should succeed");
+
+        let decoded = v.validate(&token).await.expect("token with plan data should decode");
+
+        assert_eq!(decoded.roles, vec!["admin".to_string()]);
+        assert_eq!(decoded.subscriptions["comad"].tier, "team");
+        assert_eq!(decoded.subscriptions["comad"].status, "active");
+        assert_eq!(decoded.teams["team-1"].role, "owner");
     }
 
     #[tokio::test]
