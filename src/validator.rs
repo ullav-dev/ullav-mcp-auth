@@ -26,6 +26,15 @@ pub struct SubscriptionClaim {
 pub struct TeamClaim {
     /// Positional role: `"owner"`, `"leader"`, or `"member"`.
     pub role: String,
+    /// Product slugs this team has enabled (from `team_product_access`).
+    /// Defaults to empty so tokens minted before this field was added still decode.
+    #[serde(default)]
+    pub products: Vec<String>,
+    /// The team's organization, if it has one assigned (most teams don't, yet —
+    /// organizations are a new, optional UUM concept). Defaults to `None` so
+    /// tokens minted before organizations existed still decode.
+    #[serde(default)]
+    pub organization_id: Option<String>,
 }
 
 /// Claims present in OAuth2 access tokens issued by UUM.
@@ -493,7 +502,10 @@ mod tests {
             SubscriptionClaim { tier: "team".into(), status: "active".into() },
         );
         let mut teams = HashMap::new();
-        teams.insert("team-1".to_string(), TeamClaim { role: "owner".into() });
+        teams.insert(
+            "team-1".to_string(),
+            TeamClaim { role: "owner".into(), products: vec!["tack".into()], organization_id: Some("org-1".into()) },
+        );
 
         let claims = McpClaims {
             iss: issuer.into(),
@@ -519,6 +531,8 @@ mod tests {
         assert_eq!(decoded.subscriptions["comad"].tier, "team");
         assert_eq!(decoded.subscriptions["comad"].status, "active");
         assert_eq!(decoded.teams["team-1"].role, "owner");
+        assert_eq!(decoded.teams["team-1"].products, vec!["tack".to_string()]);
+        assert_eq!(decoded.teams["team-1"].organization_id.as_deref(), Some("org-1"));
     }
 
     #[tokio::test]
