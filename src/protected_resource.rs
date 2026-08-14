@@ -34,6 +34,23 @@ pub async fn protected_resource_metadata(
     }))
 }
 
+/// Derives the RFC 9728 `resource_metadata` URL for a resource server's own
+/// canonical URI (e.g. `http://localhost:8086/mcp` ->
+/// `http://localhost:8086/.well-known/oauth-protected-resource/mcp`) — the
+/// path `protected_resource_metadata` is conventionally registered under.
+/// Every first-party consumer of this crate was hand-rolling this exact
+/// logic in its own `main.rs`; centralizing it here so `mcp_auth_middleware`
+/// can build a correct challenge without each caller re-deriving it (and so
+/// it can't drift between consumers).
+pub fn resource_metadata_url(resource_uri: &str) -> String {
+    let path_start = resource_uri
+        .find("://")
+        .and_then(|i| resource_uri[i + 3..].find('/').map(|j| i + 3 + j))
+        .unwrap_or(resource_uri.len());
+    let (origin, path) = resource_uri.split_at(path_start);
+    format!("{origin}/.well-known/oauth-protected-resource{path}")
+}
+
 /// Build a `401 Unauthorized` response with the correct `WWW-Authenticate`
 /// header pointing at the protected resource metadata document.
 ///
@@ -48,6 +65,26 @@ pub fn unauthorized_response(resource_metadata_url: &str, scope: &str) -> Respon
             ),
         )],
         Json(serde_json::json!({ "error": "unauthorized" })),
+    )
+        .into_response()
+}
+
+/// Build a `403 Forbidden` response with a `WWW-Authenticate` challenge
+/// carrying `error="insufficient_scope"` (RFC 6750 §3.1) — for a caller
+/// presenting a valid, otherwise-authenticated token that just lacks the
+/// scope this resource requires. Distinct from `unauthorized_response`
+/// (401: no valid token at all) since a client needs to tell the two apart
+/// to know whether re-authenticating would even help.
+pub fn insufficient_scope_response(resource_metadata_url: &str, scope: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [(
+            axum::http::header::WWW_AUTHENTICATE,
+            format!(
+                r#"Bearer resource_metadata="{resource_metadata_url}", scope="{scope}", error="insufficient_scope""#
+            ),
+        )],
+        Json(serde_json::json!({ "error": "insufficient_scope" })),
     )
         .into_response()
 }
